@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Copyright (c) Facebook, Inc. and its affiliates.
 
 """
 Common data processing utilities that are used in a
@@ -9,7 +9,6 @@ import logging
 import numpy as np
 import pycocotools.mask as mask_util
 import torch
-from fvcore.common.file_io import PathManager
 from PIL import Image
 
 from detectron2.structures import (
@@ -22,6 +21,7 @@ from detectron2.structures import (
     RotatedBoxes,
     polygons_to_bitmask,
 )
+from detectron2.utils.file_io import PathManager
 
 from . import transforms as T
 from .catalog import MetadataCatalog
@@ -137,7 +137,10 @@ def _apply_exif_orientation(image):
     if not hasattr(image, "getexif"):
         return image
 
-    exif = image.getexif()
+    try:
+        exif = image.getexif()
+    except Exception:  # https://github.com/facebookresearch/detectron2/issues/1885
+        exif = None
 
     if exif is None:
         return image
@@ -177,7 +180,6 @@ def read_image(file_name, format=None):
 
         # work around this bug: https://github.com/python-pillow/Pillow/issues/3973
         image = _apply_exif_orientation(image)
-
         return convert_PIL_to_numpy(image, format)
 
 
@@ -375,7 +377,7 @@ def annotations_to_instances(annos, image_size, mask_format="polygon"):
     target = Instances(image_size)
     target.gt_boxes = Boxes(boxes)
 
-    classes = [obj["category_id"] for obj in annos]
+    classes = [int(obj["category_id"]) for obj in annos]
     classes = torch.tensor(classes, dtype=torch.int64)
     target.gt_classes = classes
 
@@ -577,8 +579,13 @@ def build_augmentation(cfg, is_train):
         max_size = cfg.INPUT.MAX_SIZE_TEST
         sample_style = "choice"
     augmentation = [T.ResizeShortestEdge(min_size, max_size, sample_style)]
-    if is_train:
-        augmentation.append(T.RandomFlip())
+    if is_train and cfg.INPUT.RANDOM_FLIP != "none":
+        augmentation.append(
+            T.RandomFlip(
+                horizontal=cfg.INPUT.RANDOM_FLIP == "horizontal",
+                vertical=cfg.INPUT.RANDOM_FLIP == "vertical",
+            )
+        )
     return augmentation
 
 

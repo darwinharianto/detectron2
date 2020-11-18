@@ -1,21 +1,23 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Copyright (c) Facebook, Inc. and its affiliates.
 
 import itertools
 import logging
 import numpy as np
+from collections import UserDict
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional, Sequence
 import torch
+from torch.utils.data.dataset import Dataset
 
 from detectron2.config import CfgNode
+from detectron2.data.build import build_detection_test_loader as d2_build_detection_test_loader
+from detectron2.data.build import build_detection_train_loader as d2_build_detection_train_loader
 from detectron2.data.build import (
-    build_batch_data_loader,
     load_proposals_into_dataset,
     print_instances_class_histogram,
     trivial_batch_collator,
 )
-from detectron2.data.catalog import DatasetCatalog, MetadataCatalog
-from detectron2.data.common import DatasetFromList, MapDataset
-from detectron2.data.samplers import InferenceSampler, RepeatFactorTrainingSampler, TrainingSampler
+from detectron2.data.catalog import DatasetCatalog, Metadata, MetadataCatalog
+from detectron2.data.samplers import TrainingSampler
 from detectron2.utils.comm import get_world_size
 
 from densepose.config import get_bootstrap_dataset_config
@@ -335,32 +337,9 @@ def build_detection_train_loader(cfg: CfgNode, mapper=None):
         keep_instance_predicate=_get_train_keep_instance_predicate(cfg),
         proposal_files=cfg.DATASETS.PROPOSAL_FILES_TRAIN if cfg.MODEL.LOAD_PROPOSALS else None,
     )
-    dataset = DatasetFromList(dataset_dicts, copy=False)
-
     if mapper is None:
         mapper = DatasetMapper(cfg, True)
-    dataset = MapDataset(dataset, mapper)
-
-    sampler_name = cfg.DATALOADER.SAMPLER_TRAIN
-    logger = logging.getLogger(__name__)
-    logger.info("Using training sampler {}".format(sampler_name))
-    if sampler_name == "TrainingSampler":
-        sampler = TrainingSampler(len(dataset))
-    elif sampler_name == "RepeatFactorTrainingSampler":
-        repeat_factors = RepeatFactorTrainingSampler.repeat_factors_from_category_frequency(
-            dataset_dicts, cfg.DATALOADER.REPEAT_THRESHOLD
-        )
-        sampler = RepeatFactorTrainingSampler(repeat_factors)
-    else:
-        raise ValueError("Unknown training sampler: {}".format(sampler_name))
-
-    return build_batch_data_loader(
-        dataset,
-        sampler,
-        cfg.SOLVER.IMS_PER_BATCH,
-        aspect_ratio_grouping=cfg.DATALOADER.ASPECT_RATIO_GROUPING,
-        num_workers=cfg.DATALOADER.NUM_WORKERS,
-    )
+    return d2_build_detection_train_loader(cfg, dataset=dataset_dicts, mapper=mapper)
 
 
 def build_detection_test_loader(cfg, dataset_name, mapper=None):
@@ -391,24 +370,11 @@ def build_detection_test_loader(cfg, dataset_name, mapper=None):
         if cfg.MODEL.LOAD_PROPOSALS
         else None,
     )
-
-    dataset = DatasetFromList(dataset_dicts)
     if mapper is None:
         mapper = DatasetMapper(cfg, False)
-    dataset = MapDataset(dataset, mapper)
-
-    sampler = InferenceSampler(len(dataset))
-    # Always use 1 image per worker during inference since this is the
-    # standard when reporting inference time in papers.
-    batch_sampler = torch.utils.data.sampler.BatchSampler(sampler, 1, drop_last=False)
-
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        num_workers=cfg.DATALOADER.NUM_WORKERS,
-        batch_sampler=batch_sampler,
-        collate_fn=trivial_batch_collator,
+    return d2_build_detection_test_loader(
+        dataset_dicts, mapper=mapper, num_workers=cfg.DATALOADER.NUM_WORKERS
     )
-    return data_loader
 
 
 def build_frame_selector(cfg: CfgNode):
@@ -450,18 +416,13 @@ def build_bootstrap_dataset(dataset_name: str, cfg: CfgNode) -> Sequence[torch.T
     """
     logger = logging.getLogger(__name__)
     meta = MetadataCatalog.get(dataset_name)
-    if meta.dataset_type == DatasetType.VIDEO_LIST:
-        video_list_fpath = meta.video_list_fpath
-        video_base_path = meta.video_base_path
-        if cfg.TYPE == "video_keyframe":
-            frame_selector = build_frame_selector(cfg.SELECT)
-            transform = build_transform(cfg.TRANSFORM, data_type="image")
-            video_list = video_list_from_file(video_list_fpath, video_base_path)
-            return VideoKeyframeDataset(video_list, frame_selector, transform)
-    logger.warning(
-        f"Could not create an image sampler of type {cfg.TYPE} for dataset {dataset_name}"
-    )
-    return None
+    factory = BootstrapDatasetFactoryCatalog.get(meta.dataset_type)
+    dataset = None
+    if factory is not None:
+        dataset = factory(meta, cfg)
+    if dataset is None:
+        logger.warning(f"Failed to create dataset {dataset_name} of type {meta.dataset_type}")
+    return dataset
 
 
 def build_data_sampler(cfg: CfgNode):
@@ -574,3 +535,34 @@ def build_inference_based_loaders(
         loaders.append(loader)
         ratios.append(dataset_cfg.RATIO)
     return loaders, ratios
+
+
+def build_video_list_dataset(meta: Metadata, cfg: CfgNode):
+    video_list_fpath = meta.video_list_fpath
+    video_base_path = meta.video_base_path
+    if cfg.TYPE == "video_keyframe":
+        frame_selector = build_frame_selector(cfg.SELECT)
+        transform = build_transform(cfg.TRANSFORM, data_type="image")
+        video_list = video_list_from_file(video_list_fpath, video_base_path)
+        return VideoKeyframeDataset(video_list, frame_selector, transform)
+
+
+class _BootstrapDatasetFactoryCatalog(UserDict):
+    """
+    A global dictionary that stores information about bootstrapped datasets creation functions
+    from metadata and config, for diverse DatasetType
+    """
+
+    def register(self, dataset_type: DatasetType, factory: Callable[[Metadata, CfgNode], Dataset]):
+        """
+        Args:
+            dataset_type (DatasetType): a DatasetType e.g. DatasetType.VIDEO_LIST
+            factory (Callable[Metadata, CfgNode]): a callable which takes Metadata and cfg
+            arguments and returns a dataset object.
+        """
+        assert dataset_type not in self, "Dataset '{}' is already registered!".format(dataset_type)
+        self[dataset_type] = factory
+
+
+BootstrapDatasetFactoryCatalog = _BootstrapDatasetFactoryCatalog()
+BootstrapDatasetFactoryCatalog.register(DatasetType.VIDEO_LIST, build_video_list_dataset)

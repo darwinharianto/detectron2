@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 import argparse
 import os
 import onnx
@@ -10,7 +10,6 @@ from detectron2.data import build_detection_test_loader
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset, print_csv_format
 from detectron2.export import Caffe2Tracer, add_export_config
 from detectron2.modeling import build_model
-from detectron2.utils.env import TORCH_VERSION
 from detectron2.utils.logger import setup_logger
 
 
@@ -22,8 +21,6 @@ def setup_cfg(args):
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
-    if cfg.MODEL.DEVICE != "cpu":
-        assert TORCH_VERSION >= (1, 5), "PyTorch>=1.5 required for GPU conversion!"
     return cfg
 
 
@@ -70,21 +67,11 @@ if __name__ == "__main__":
         onnx_model = tracer.export_onnx()
         onnx.save(onnx_model, os.path.join(args.output, "model.onnx"))
     elif args.format == "torchscript":
-        script_model = tracer.export_torchscript()
-        script_model.save(os.path.join(args.output, "model.ts"))
+        ts_model = tracer.export_torchscript()
+        ts_model.save(os.path.join(args.output, "model.ts"))
+        from detectron2.export.torchscript import dump_torchscript_IR
 
-        # Recursively print IR of all modules
-        with open(os.path.join(args.output, "model_ts_IR.txt"), "w") as f:
-            try:
-                f.write(script_model._actual_script_module._c.dump_to_str(True, False, False))
-            except AttributeError:
-                pass
-        # Print IR of the entire graph (all submodules inlined)
-        with open(os.path.join(args.output, "model_ts_IR_inlined.txt"), "w") as f:
-            f.write(str(script_model.inlined_graph))
-        # Print the model structure in pytorch style
-        with open(os.path.join(args.output, "model.txt"), "w") as f:
-            f.write(str(script_model))
+        dump_torchscript_IR(ts_model, args.output)
 
     # run evaluation with the converted model
     if args.run_eval:
@@ -92,6 +79,6 @@ if __name__ == "__main__":
         dataset = cfg.DATASETS.TEST[0]
         data_loader = build_detection_test_loader(cfg, dataset)
         # NOTE: hard-coded evaluator. change to the evaluator for your dataset
-        evaluator = COCOEvaluator(dataset, cfg, True, args.output)
+        evaluator = COCOEvaluator(dataset, output_dir=args.output)
         metrics = inference_on_dataset(caffe2_model, data_loader, evaluator)
         print_csv_format(metrics)

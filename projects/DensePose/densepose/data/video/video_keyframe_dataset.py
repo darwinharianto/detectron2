@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Copyright (c) Facebook, Inc. and its affiliates.
 
 import logging
 import numpy as np
 from typing import Callable, List, Optional
 import torch
-from fvcore.common.file_io import PathManager
 from torch.utils.data.dataset import Dataset
+
+from detectron2.utils.file_io import PathManager
 
 import av
 
@@ -83,6 +84,12 @@ def list_keyframes(video_fpath: str, video_stream_idx: int = 0) -> FrameTsList:
         logger.warning(
             f"List keyframes: Error opening video file container {video_fpath}, " f"OS error: {e}"
         )
+    except RuntimeError as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"List keyframes: Error opening video file container {video_fpath}, "
+            f"Runtime error: {e}"
+        )
     return []
 
 
@@ -140,9 +147,14 @@ def read_keyframes(
     except OSError as e:
         logger = logging.getLogger(__name__)
         logger.warning(
-            f"Read keyframes: Error opening video file container {video_fpath}, " f"OS error: {e}"
+            f"Read keyframes: Error opening video file container {video_fpath}, OS error: {e}"
         )
-        return []
+    except RuntimeError as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"Read keyframes: Error opening video file container {video_fpath}, Runtime error: {e}"
+        )
+    return []
 
 
 def video_list_from_file(video_list_fpath: str, base_path: Optional[str] = None):

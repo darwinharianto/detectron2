@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Copyright (c) Facebook, Inc. and its affiliates.
 import json
 import numpy as np
 import os
@@ -94,6 +94,8 @@ class TestRLEToJson(unittest.TestCase):
         anno = dicts[0]["annotations"][0]
         loaded_mask = mask_util.decode(anno["segmentation"])
         self.assertTrue(np.array_equal(loaded_mask, mask))
+        DatasetCatalog.pop("test_dataset")
+        MetadataCatalog.pop("test_dataset")
 
     def test_uncompressed_RLE(self):
         mask = make_mask()

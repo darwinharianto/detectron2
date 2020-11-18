@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Copyright (c) Facebook, Inc. and its affiliates.
 from .config import CfgNode as CN
 
 # -----------------------------------------------------------------------------
@@ -57,6 +57,9 @@ _C.INPUT.MAX_SIZE_TRAIN = 1333
 _C.INPUT.MIN_SIZE_TEST = 800
 # Maximum size of the side of the image during testing
 _C.INPUT.MAX_SIZE_TEST = 1333
+# Mode for flipping images used in data augmentation during training
+# choose one of ["horizontal, "vertical", "none"]
+_C.INPUT.RANDOM_FLIP = "horizontal"
 
 # `True` if cropping is used for data augmentation during training
 _C.INPUT.CROP = CN({"ENABLED": False})
@@ -212,7 +215,7 @@ _C.MODEL.RPN.BOUNDARY_THRESH = -1
 # are ignored (-1)
 _C.MODEL.RPN.IOU_THRESHOLDS = [0.3, 0.7]
 _C.MODEL.RPN.IOU_LABELS = [0, -1, 1]
-# Total number of RPN examples per image
+# Number of regions per image used to train RPN
 _C.MODEL.RPN.BATCH_SIZE_PER_IMAGE = 256
 # Target fraction of foreground (positive) examples per RPN minibatch
 _C.MODEL.RPN.POSITIVE_FRACTION = 0.5
@@ -439,6 +442,7 @@ _C.MODEL.RETINANET.PRIOR_PROB = 0.01
 # Inference cls score threshold, only anchors with score > INFERENCE_TH are
 # considered for inference (to improve speed)
 _C.MODEL.RETINANET.SCORE_THRESH_TEST = 0.05
+# Select topk candidates before NMS
 _C.MODEL.RETINANET.TOPK_CANDIDATES_TEST = 1000
 _C.MODEL.RETINANET.NMS_THRESH_TEST = 0.5
 
@@ -449,6 +453,12 @@ _C.MODEL.RETINANET.BBOX_REG_WEIGHTS = (1.0, 1.0, 1.0, 1.0)
 _C.MODEL.RETINANET.FOCAL_LOSS_GAMMA = 2.0
 _C.MODEL.RETINANET.FOCAL_LOSS_ALPHA = 0.25
 _C.MODEL.RETINANET.SMOOTH_L1_LOSS_BETA = 0.1
+# Options are: "smooth_l1", "giou"
+_C.MODEL.RETINANET.BBOX_REG_LOSS_TYPE = "smooth_l1"
+
+# One of BN, SyncBN, FrozenBN, GN
+# Only supports GN until unshared norm is implemented
+_C.MODEL.RETINANET.NORM = ""
 
 
 # ---------------------------------------------------------------------------- #
@@ -532,10 +542,11 @@ _C.SOLVER.CHECKPOINT_PERIOD = 5000
 _C.SOLVER.IMS_PER_BATCH = 16
 
 # The reference number of workers (GPUs) this config is meant to train with.
+# It takes no effect when set to 0.
 # With a non-zero value, it will be used by DefaultTrainer to compute a desired
 # per-worker batch size, and then scale the other related configs (total batch size,
-# learning rate, etc) to match the per-worker batch size if the actual number
-# of workers during training is different from this reference.
+# learning rate, etc) to match the per-worker batch size.
+# See documentation of `DefaultTrainer.auto_scale_workers` for details:
 _C.SOLVER.REFERENCE_WORLD_SIZE = 0
 
 # Detectron v1 (and previous detection code) used a 2x higher LR and 0 WD for
@@ -557,6 +568,11 @@ _C.SOLVER.CLIP_GRADIENTS.CLIP_VALUE = 1.0
 # Floating point number p for L-p norm to be used with the "norm"
 # gradient clipping type; for L-inf, please specify .inf
 _C.SOLVER.CLIP_GRADIENTS.NORM_TYPE = 2.0
+
+# Enable automatic mixed precision for training
+# Note that this does not change model's inference behavior.
+# To use AMP in inference, run inference under autocast()
+_C.SOLVER.AMP = CN({"ENABLED": False})
 
 # ---------------------------------------------------------------------------- #
 # Specific test options

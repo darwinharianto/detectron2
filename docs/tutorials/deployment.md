@@ -1,16 +1,42 @@
 # Deployment
 
+## TorchScript Deployment
+
+Models can be exported to TorchScript format, by either
+[tracing or scripting](https://pytorch.org/tutorials/beginner/Intro_to_TorchScript_tutorial.html).
+The output model file can be loaded without detectron2 dependency in either Python or C++.
+The exported model likely require torchvision (or its C library) dependency for some custom ops.
+
+This feature requires PyTorch ≥ 1.8 (or latest on github before 1.8 is released).
+
+### Coverage
+Most official models under the meta architectures `GeneralizedRCNN` and `RetinaNet`
+are supported in both tracing and scripting mode.
+Users' custom extensions are supported if they are also scriptable or traceable.
+
+For models exported with tracing, dynamic input resolution is allowed, but batch size
+(number of input images) must be fixed.
+Scripting can support dynamic batch size.
+
+### Usage
+
+The usage is currently demonstrated in [test_export_torchscript.py](https://github.com/facebookresearch/detectron2/blob/master/tests/test_export_torchscript.py)
+(see `TestScripting` and `TestTracing`).
+Note that the feature is still experimental and the high-level API may be subject to change.
+
+A complete export and deployment example is not yet available.
+
 ## Caffe2 Deployment
-We currently support converting a detectron2 model to Caffe2 format through ONNX.
+We support converting a detectron2 model to Caffe2 format through ONNX.
 The converted Caffe2 model is able to run without detectron2 dependency in either Python or C++.
 It has a runtime optimized for CPU & mobile inference, but not for GPU inference.
 
-Caffe2 conversion requires PyTorch ≥ 1.4 and ONNX ≥ 1.6.
+Caffe2 conversion requires ONNX ≥ 1.6.
 
 ### Coverage
 
-It supports 3 most common meta architectures: `GeneralizedRCNN`, `RetinaNet`, `PanopticFPN`,
-and most official models under these 3 meta architectures.
+Most official models under these 3 common meta architectures: `GeneralizedRCNN`, `RetinaNet`, `PanopticFPN`
+are supported.
 
 Users' custom extensions under these architectures (added through registration) are supported
 as long as they do not contain control flow or operators not available in Caffe2 (e.g. deformable convolution).
@@ -26,18 +52,18 @@ To convert an official Mask R-CNN trained on COCO, first
 [prepare the COCO dataset](builtin_datasets.md), then pick the model from [Model Zoo](../../MODEL_ZOO.md), and run:
 ```
 cd tools/deploy/ && ./caffe2_converter.py --config-file ../../configs/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml \
-	--output ./caffe2_model --run-eval \
-	MODEL.WEIGHTS detectron2://COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl \
-	MODEL.DEVICE cpu
+  --output ./caffe2_model --run-eval \
+  MODEL.WEIGHTS detectron2://COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl \
+  MODEL.DEVICE cpu
 ```
 
 Note that:
 1. The conversion needs valid weights & sample inputs to trace the model. That's why the script requires the dataset.
-	 You can modify the script to obtain sample inputs in other ways.
+   You can modify the script to obtain sample inputs in other ways.
 2. With the `--run-eval` flag, it will evaluate the converted models to verify its accuracy.
    The accuracy is typically slightly different (within 0.1 AP) from PyTorch due to
-	 numerical precisions between different implementations.
-	 It's recommended to always verify the accuracy in case the conversion is not successful.
+   numerical precisions between different implementations.
+   It's recommended to always verify the accuracy in case the conversion is not successful.
 
 The converted model is available at the specified `caffe2_model/` directory. Two files `model.pb`
 and `model_init.pb` that contain network structure and network parameters are necessary for deployment.
@@ -54,16 +80,25 @@ which performs CPU/GPU inference using `COCO-InstanceSegmentation/mask_rcnn_R_50
 The C++ example needs to be built with:
 * PyTorch with caffe2 inside
 * gflags, glog, opencv
-* protobuf headers that match the version of your caffe2
+* protobuf library that match the version used by PyTorch (version defined in `include/caffe2/proto/caffe2.pb.h` of your PyTorch installation)
 * MKL headers if caffe2 is built with MKL
 
-The following can compile the example inside [official detectron2 docker](../../docker/):
+The following steps can build the C++ example inside [official detectron2 docker](../../docker/):
 ```
+# install dependencies
 sudo apt update && sudo apt install libgflags-dev libgoogle-glog-dev libopencv-dev
 pip install mkl-include
-wget https://github.com/protocolbuffers/protobuf/releases/download/v3.6.1/protobuf-cpp-3.6.1.tar.gz
-tar xf protobuf-cpp-3.6.1.tar.gz
-export CPATH=$(readlink -f ./protobuf-3.6.1/src/):$HOME/.local/include
+
+# install the correct version of protobuf:
+wget https://github.com/protocolbuffers/protobuf/releases/download/v3.11.4/protobuf-cpp-3.11.4.tar.gz && tar xf protobuf-cpp-3.11.4.tar.gz
+cd protobuf-3.11.4
+export CXXFLAGS=-D_GLIBCXX_USE_CXX11_ABI=$(python3 -c 'import torch; print(int(torch.compiled_with_cxx11_abi()))')
+./configure --prefix=$HOME/.local && make && make install
+export CPATH=$HOME/.local/include
+export LIBRARY_PATH=$HOME/.local/lib
+export LD_LIBRARY_PATH=$HOME/.local/lib
+
+# build the program:
 export CMAKE_PREFIX_PATH=$HOME/.local/lib/python3.6/site-packages/torch/
 mkdir build && cd build
 cmake -DTORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST .. && make
@@ -91,3 +126,8 @@ This method has an interface that's identical to the [pytorch versions of models
 and it internally applies pre/post-processing code to match the formats.
 This wrapper can serve as a reference for how to use caffe2's python API,
 or for how to implement pre/post-processing in actual deployment.
+
+## Conversion to TensorFlow
+[tensorpack Faster R-CNN](https://github.com/tensorpack/tensorpack/tree/master/examples/FasterRCNN/convert_d2)
+provides scripts to convert a few standard detectron2 R-CNN models to TensorFlow's pb format.
+It works by translating configs and weights, therefore only support a few models.

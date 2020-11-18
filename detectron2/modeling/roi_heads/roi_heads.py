@@ -1,8 +1,8 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Copyright (c) Facebook, Inc. and its affiliates.
 import inspect
 import logging
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 import torch
 from torch import nn
 
@@ -12,7 +12,7 @@ from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.registry import Registry
 
-from ..backbone.resnet import BottleneckBlock, make_stage
+from ..backbone.resnet import BottleneckBlock, ResNet
 from ..matcher import Matcher
 from ..poolers import ROIPooler
 from ..proposal_generator.proposal_utils import add_ground_truth_to_proposals
@@ -394,10 +394,10 @@ class Res5ROIHeads(ROIHeads):
             "Deformable conv is not yet supported in res5 head."
         # fmt: on
 
-        blocks = make_stage(
+        blocks = ResNet.make_stage(
             BottleneckBlock,
             3,
-            first_stride=2,
+            stride_per_block=[2, 1, 1],
             in_channels=out_channels // 2,
             bottleneck_channels=bottleneck_channels,
             out_channels=out_channels,
@@ -512,11 +512,14 @@ class StandardROIHeads(ROIHeads):
             box_head (nn.Module): transform features to make box predictions
             box_predictor (nn.Module): make box predictions from the feature.
                 Should have the same interface as :class:`FastRCNNOutputLayers`.
-            mask_in_features (list[str]): list of feature names to use for the mask head.
-                None if not using mask head.
-            mask_pooler (ROIPooler): pooler to extra region features for mask head
+            mask_in_features (list[str]): list of feature names to use for the mask
+                pooler or mask head. None if not using mask head.
+            mask_pooler (ROIPooler): pooler to extract region features from image features.
+                The mask head will then take region features to make predictions.
+                If None, the mask head will directly take the dict of image features
+                defined by `mask_in_features`
             mask_head (nn.Module): transform features to make mask predictions
-            keypoint_in_features, keypoint_pooler, keypoint_head: similar to ``mask*``.
+            keypoint_in_features, keypoint_pooler, keypoint_head: similar to ``mask_*``.
             train_on_pred_boxes (bool): whether to use proposal boxes or
                 predicted boxes from the box head to train other heads.
         """
@@ -532,6 +535,7 @@ class StandardROIHeads(ROIHeads):
             self.mask_in_features = mask_in_features
             self.mask_pooler = mask_pooler
             self.mask_head = mask_head
+
         self.keypoint_on = keypoint_in_features is not None
         if self.keypoint_on:
             self.keypoint_in_features = keypoint_in_features
@@ -609,15 +613,23 @@ class StandardROIHeads(ROIHeads):
         in_channels = [input_shape[f].channels for f in in_features][0]
 
         ret = {"mask_in_features": in_features}
-        ret["mask_pooler"] = ROIPooler(
-            output_size=pooler_resolution,
-            scales=pooler_scales,
-            sampling_ratio=sampling_ratio,
-            pooler_type=pooler_type,
+        ret["mask_pooler"] = (
+            ROIPooler(
+                output_size=pooler_resolution,
+                scales=pooler_scales,
+                sampling_ratio=sampling_ratio,
+                pooler_type=pooler_type,
+            )
+            if pooler_type
+            else None
         )
-        ret["mask_head"] = build_mask_head(
-            cfg, ShapeSpec(channels=in_channels, width=pooler_resolution, height=pooler_resolution)
-        )
+        if pooler_type:
+            shape = ShapeSpec(
+                channels=in_channels, width=pooler_resolution, height=pooler_resolution
+            )
+        else:
+            shape = {f: input_shape[f] for f in in_features}
+        ret["mask_head"] = build_mask_head(cfg, shape)
         return ret
 
     @classmethod
@@ -635,15 +647,23 @@ class StandardROIHeads(ROIHeads):
         in_channels = [input_shape[f].channels for f in in_features][0]
 
         ret = {"keypoint_in_features": in_features}
-        ret["keypoint_pooler"] = ROIPooler(
-            output_size=pooler_resolution,
-            scales=pooler_scales,
-            sampling_ratio=sampling_ratio,
-            pooler_type=pooler_type,
+        ret["keypoint_pooler"] = (
+            ROIPooler(
+                output_size=pooler_resolution,
+                scales=pooler_scales,
+                sampling_ratio=sampling_ratio,
+                pooler_type=pooler_type,
+            )
+            if pooler_type
+            else None
         )
-        ret["keypoint_head"] = build_keypoint_head(
-            cfg, ShapeSpec(channels=in_channels, width=pooler_resolution, height=pooler_resolution)
-        )
+        if pooler_type:
+            shape = ShapeSpec(
+                channels=in_channels, width=pooler_resolution, height=pooler_resolution
+            )
+        else:
+            shape = {f: input_shape[f] for f in in_features}
+        ret["keypoint_head"] = build_keypoint_head(cfg, shape)
         return ret
 
     def forward(
@@ -658,11 +678,13 @@ class StandardROIHeads(ROIHeads):
         """
         del images
         if self.training:
-            assert targets
+            assert not torch.jit.is_scripting()
+            assert targets, "'targets' argument is required during training"
             proposals = self.label_and_sample_proposals(proposals, targets)
         del targets
 
         if self.training:
+            assert not torch.jit.is_scripting()
             losses = self._forward_box(features, proposals)
             # Usually the original proposals used by the box head are used by the mask, keypoint
             # heads. But when `self.train_on_pred_boxes is True`, proposals will contain boxes
@@ -704,9 +726,7 @@ class StandardROIHeads(ROIHeads):
         instances = self._forward_keypoint(features, instances)
         return instances
 
-    def _forward_box(
-        self, features: Dict[str, torch.Tensor], proposals: List[Instances]
-    ) -> Union[Dict[str, torch.Tensor], List[Instances]]:
+    def _forward_box(self, features: Dict[str, torch.Tensor], proposals: List[Instances]):
         """
         Forward logic of the box prediction branch. If `self.train_on_pred_boxes is True`,
             the function puts predicted boxes in the `proposal_boxes` field of `proposals` argument.
@@ -730,6 +750,7 @@ class StandardROIHeads(ROIHeads):
         del box_features
 
         if self.training:
+            assert not torch.jit.is_scripting()
             losses = self.box_predictor.losses(predictions, proposals)
             # proposals is modified in-place below, so losses must be computed first.
             if self.train_on_pred_boxes:
@@ -744,9 +765,7 @@ class StandardROIHeads(ROIHeads):
             pred_instances, _ = self.box_predictor.inference(predictions, proposals)
             return pred_instances
 
-    def _forward_mask(
-        self, features: Dict[str, torch.Tensor], instances: List[Instances]
-    ) -> Union[Dict[str, torch.Tensor], List[Instances]]:
+    def _forward_mask(self, features: Dict[str, torch.Tensor], instances: List[Instances]):
         """
         Forward logic of the mask prediction branch.
 
@@ -755,31 +774,38 @@ class StandardROIHeads(ROIHeads):
                 Same as in :meth:`ROIHeads.forward`.
             instances (list[Instances]): the per-image instances to train/predict masks.
                 In training, they can be the proposals.
-                In inference, they can be the predicted boxes.
+                In inference, they can be the boxes predicted by R-CNN box head.
 
         Returns:
             In training, a dict of losses.
             In inference, update `instances` with new fields "pred_masks" and return it.
         """
         if not self.mask_on:
-            return {} if self.training else instances
+            # https://github.com/pytorch/pytorch/issues/43942
+            if self.training:
+                assert not torch.jit.is_scripting()
+                return {}
+            else:
+                return instances
 
-        features = [features[f] for f in self.mask_in_features]
+        # https://github.com/pytorch/pytorch/issues/46703
+        assert hasattr(self, "mask_head")
 
         if self.training:
-            # The loss is only defined on positive proposals.
-            proposals, _ = select_foreground_proposals(instances, self.num_classes)
-            proposal_boxes = [x.proposal_boxes for x in proposals]
-            mask_features = self.mask_pooler(features, proposal_boxes)
-            return self.mask_head(mask_features, proposals)
-        else:
-            pred_boxes = [x.pred_boxes for x in instances]
-            mask_features = self.mask_pooler(features, pred_boxes)
-            return self.mask_head(mask_features, instances)
+            assert not torch.jit.is_scripting()
+            # head is only trained on positive proposals.
+            instances, _ = select_foreground_proposals(instances, self.num_classes)
 
-    def _forward_keypoint(
-        self, features: Dict[str, torch.Tensor], instances: List[Instances]
-    ) -> Union[Dict[str, torch.Tensor], List[Instances]]:
+        if self.mask_pooler is not None:
+            features = [features[f] for f in self.mask_in_features]
+            boxes = [x.proposal_boxes if self.training else x.pred_boxes for x in instances]
+            features = self.mask_pooler(features, boxes)
+        else:
+            # https://github.com/pytorch/pytorch/issues/41448
+            features = dict([(f, features[f]) for f in self.mask_in_features])
+        return self.mask_head(features, instances)
+
+    def _forward_keypoint(self, features: Dict[str, torch.Tensor], instances: List[Instances]):
         """
         Forward logic of the keypoint prediction branch.
 
@@ -788,26 +814,31 @@ class StandardROIHeads(ROIHeads):
                 Same as in :meth:`ROIHeads.forward`.
             instances (list[Instances]): the per-image instances to train/predict keypoints.
                 In training, they can be the proposals.
-                In inference, they can be the predicted boxes.
+                In inference, they can be the boxes predicted by R-CNN box head.
 
         Returns:
             In training, a dict of losses.
             In inference, update `instances` with new fields "pred_keypoints" and return it.
         """
         if not self.keypoint_on:
-            return {} if self.training else instances
+            if self.training:
+                assert not torch.jit.is_scripting()
+                return {}
+            else:
+                return instances
 
-        features = [features[f] for f in self.keypoint_in_features]
+        assert hasattr(self, "keypoint_head")
 
         if self.training:
-            # The loss is defined on positive proposals with >=1 visible keypoints.
-            proposals, _ = select_foreground_proposals(instances, self.num_classes)
-            proposals = select_proposals_with_visible_keypoints(proposals)
-            proposal_boxes = [x.proposal_boxes for x in proposals]
+            assert not torch.jit.is_scripting()
+            # head is only trained on positive proposals with >=1 visible keypoints.
+            instances, _ = select_foreground_proposals(instances, self.num_classes)
+            instances = select_proposals_with_visible_keypoints(instances)
 
-            keypoint_features = self.keypoint_pooler(features, proposal_boxes)
-            return self.keypoint_head(keypoint_features, proposals)
+        if self.keypoint_pooler is not None:
+            features = [features[f] for f in self.keypoint_in_features]
+            boxes = [x.proposal_boxes if self.training else x.pred_boxes for x in instances]
+            features = self.keypoint_pooler(features, boxes)
         else:
-            pred_boxes = [x.pred_boxes for x in instances]
-            keypoint_features = self.keypoint_pooler(features, pred_boxes)
-            return self.keypoint_head(keypoint_features, instances)
+            features = dict([(f, features[f]) for f in self.keypoint_in_features])
+        return self.keypoint_head(features, instances)

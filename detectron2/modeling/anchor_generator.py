@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Copyright (c) Facebook, Inc. and its affiliates.
 import math
 from typing import List
 import torch
@@ -134,6 +134,7 @@ class DefaultAnchorGenerator(nn.Module):
         return BufferList(cell_anchors)
 
     @property
+    @torch.jit.unused
     def num_cell_anchors(self):
         """
         Alias of `num_anchors`.
@@ -141,6 +142,7 @@ class DefaultAnchorGenerator(nn.Module):
         return self.num_anchors
 
     @property
+    @torch.jit.unused
     def num_anchors(self):
         """
         Returns:
