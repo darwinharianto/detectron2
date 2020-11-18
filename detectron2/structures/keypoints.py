@@ -2,6 +2,7 @@
 import numpy as np
 from typing import Any, List, Tuple, Union
 import torch
+from detectron2.lib.csrc.ransac_voting.ransac_voting_gpu import ransac_voting_layer_v3
 
 from detectron2.layers import interpolate
 
@@ -56,6 +57,23 @@ class Keypoints:
                 A tensor of shape (N, K) containing whether each keypoint is in the roi or not.
         """
         return _keypoints_to_heatmap(self.tensor, boxes, heatmap_size)
+
+    def to_vector_field(self, boxes: torch.Tensor, vector_field_size: int) -> torch.Tensor:
+        """
+        Convert keypoint annotations to a vector field of xy-vector labels for training,
+        as described in :paper:`Pixel Wise Voting network`.
+
+        Arguments:
+            boxes: Nx4 tensor, the boxes to draw the keypoints to
+
+        Returns:
+            vector fields:
+                A tensor of shape (N, K), each element is integer spatial label
+                in the range [0, vector_field_size**2 - 1] for each keypoint in the input.
+            valid:
+                A tensor of shape (N, K) containing whether each keypoint is in the roi or not.
+        """
+        return _keypoints_to_vector_field(self.tensor, boxes, vector_field_size)
 
     def __getitem__(self, item: Union[int, slice, torch.BoolTensor]) -> "Keypoints":
         """
@@ -210,3 +228,227 @@ def heatmaps_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.Tenso
         xy_preds[i, :, 3] = roi_map_scores[keypoints_idx, y_int, x_int]
 
     return xy_preds
+
+
+
+def compute_vertex(vector_field_size, keypoints):
+    vector_field = np.ones((vector_field_size,vector_field_size))
+    h,w = vector_field.shape
+    m = keypoints.shape[0]
+    xy = np.argwhere(vector_field == 1)[:, [1,0]]
+
+    vertex = keypoints[None] - xy[:,None]
+    norm = np.linalg.norm(vertex, axis=2, keepdims=True)
+    norm[norm<1e-3] += 1e-3
+    vertex = vertex/norm
+
+    vertex_out= np.zeros([h, w, m, 2], np.float32)
+    vertex_out[xy[:, 1], xy[:,0]] = vertex
+    vertex_out = np.reshape(vertex_out, [h, w, m*2])
+
+    print(vertex_out.shape)
+    return vertex_out
+
+# TODO make this nicer, this is a direct translation from C2 (but removing the inner loop)
+def _keypoints_to_vector_field(
+    keypoints: torch.Tensor, rois: torch.Tensor, vector_field_size: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Encode keypoint locations into a target vector fields for use in SoftmaxWithLoss across space.
+
+    Maps keypoints from the half-open interval [x1, x2) on continuous image coordinates to the
+    closed interval [0, vector_field_size - 1] on discrete image coordinates. We use the
+    continuous-discrete conversion from Heckbert 1990 ("What is the coordinate of a pixel?"):
+    d = floor(c) and c = d + 0.5, where d is a discrete coordinate and c is a continuous coordinate.
+
+    Arguments:
+        keypoints: tensor of keypoint locations in of shape (N, K, 3).
+        rois: Nx4 tensor of rois in xyxy format
+        vector_field_size: integer side length of square vector_field.
+
+    Returns:
+        vector fields: A tensor of shape (N, K*2, W, H) containing an vector field map.
+            W and H represents width and height of the map.
+        valid: A tensor of shape (N, K) containing whether each keypoint is in
+            the roi or not.
+    """
+
+    if rois.numel() == 0:
+        return rois.new().long(), rois.new().long()
+    offset_x = rois[:, 0]
+    offset_y = rois[:, 1]
+    scale_x = vector_field_size / (rois[:, 2] - rois[:, 0])
+    scale_y = vector_field_size / (rois[:, 3] - rois[:, 1])
+
+    offset_x = offset_x[:, None]
+    offset_y = offset_y[:, None]
+    scale_x = scale_x[:, None]
+    scale_y = scale_y[:, None]
+
+    x = keypoints[..., 0]
+    y = keypoints[..., 1]
+
+    x_boundary_inds = x == rois[:, 2][:, None]
+    y_boundary_inds = y == rois[:, 3][:, None]
+
+    x = (x - offset_x) * scale_x
+    x = x.floor().long()
+    y = (y - offset_y) * scale_y
+    y = y.floor().long()
+
+    x[x_boundary_inds] = vector_field_size - 1
+    y[y_boundary_inds] = vector_field_size - 1
+    valid_loc = (x >= 0) & (y >= 0) & (x < vector_field_size) & (y < vector_field_size)
+    vis = keypoints[..., 2] > 0
+    valid = (valid_loc & vis).long()
+    valid = valid.repeat_interleave(2)
+    
+    lin_ind = torch.empty(keypoints.shape[2],keypoints.shape[2]*2,vector_field_size,vector_field_size)
+    # print(lin_ind.shape)
+
+
+    for j, kpt_2d_list in enumerate((zip(x,y))):
+
+        x_list = kpt_2d_list[0]
+        y_list = kpt_2d_list[1]
+        if len(x_list) == len(y_list):
+            for i in range(len(x_list)):
+                
+                kpt = np.array([[x_list[i], y_list[i]]])
+                vec_field = compute_vertex(vector_field_size,kpt)
+                lin_ind[j,2*i,:,:] = torch.tensor(vec_field)[:,:,0]
+                lin_ind[j,2*i+1,:,:] = torch.tensor(vec_field)[:,:,1]
+
+    ### pvnet always valid
+    vector_fields = lin_ind
+    valid = torch.reshape(valid, (vector_fields.shape[0],-1))
+    # print("vector field", vector_fields)
+    
+    return vector_fields, valid
+
+
+
+# how to make this???
+def decode_keypoint(vec_field):
+    """
+    Input vector fields map, output corresponding 2D keypoint outputs.
+    This method is extracted from PVNet, resnet18.py
+
+    Args:
+        vec_field: Predicted vector fields with number of keypoints*2 for each
+                    x and y direction
+
+    Returns:
+        Corresponding 2D keypoints that is generated from each vector field.
+        Return item will have dimension N, K, 2.
+        N represents number layer, K represents number of keypoints, 2 means x and y position.
+        
+
+    This method is using ransac layer and compiled in C.
+    """
+
+    vertex = vec_field.permute(0,2,3,1)
+    b,h,w,vn_2 = vertex.shape
+    vertex = vertex.view(b,h,w,vn_2//2, 2)
+    mask = torch.ones((b,h,w))
+    print(vertex.shape)
+    print(mask.shape)
+
+    kpt_2d = ransac_voting_layer_v3(mask.cuda(), vertex.cuda(), 128, inlier_thresh=0.99, max_num=100)
+    
+    return kpt_2d.cpu()
+
+@torch.no_grad()
+def vector_field_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.Tensor:
+    """
+    Extract predicted keypoint locations from vector fields.
+
+    Args:
+        maps (Tensor): (#ROIs, #keypoints, POOL_H, POOL_W). The predicted vector fields for
+            each ROI and each keypoint.
+        rois (Tensor): (#ROIs, 4). The box of each ROI.
+
+    Returns:
+        Tensor of shape (#ROIs, #keypoints, 4) with the last dimension corresponding to
+        (x, y, logit, score) for each keypoint.
+
+    When converting discrete pixel indices in an NxN image to a continuous keypoint coordinate,
+    we maintain consistency with :meth:`Keypoints.to_vector_field` by using the conversion from
+    Heckbert 1990: c = d + 0.5, where d is a discrete coordinate and c is a continuous coordinate.
+    """
+    
+    offset_x = rois[:, 0]
+    offset_y = rois[:, 1]
+    print(f"offset_x {offset_x}")
+    print("roi", rois.shape)
+    print("maps", maps.shape)
+
+    widths = (rois[:, 2] - rois[:, 0]).clamp(min=1)
+    heights = (rois[:, 3] - rois[:, 1]).clamp(min=1)
+    widths_ceil = widths.ceil()
+    heights_ceil = heights.ceil()
+
+    num_rois, num_keypoints = maps.shape[:2]
+    xy_preds = maps.new_zeros(rois.shape[0], num_keypoints//2, 4)
+    
+
+    width_corrections = widths / widths_ceil
+    height_corrections = heights / heights_ceil
+
+    # keypoints_idx = torch.arange(num_keypoints, device=maps.device)
+
+    for i in range(num_rois):
+        outsize = (int(heights_ceil[i]), int(widths_ceil[i]))
+        roi_map = interpolate(maps[[i]], size=outsize, mode="bicubic", align_corners=False).squeeze(
+            0
+        )  # #keypoints x H x W
+
+        # # softmax over the spatial region
+        # max_score, _ = roi_map.view(num_keypoints, -1).max(1)
+        # max_score = max_score.view(num_keypoints, 1, 1)
+        # tmp_full_resolution = (roi_map - max_score).exp_()
+        # tmp_pool_resolution = (maps[i] - max_score).exp_()
+        # # Produce scores over the region H x W, but normalize with POOL_H x POOL_W,
+        # # so that the scores of objects of different absolute sizes will be more comparable
+        # roi_map_scores = tmp_full_resolution / tmp_pool_resolution.sum((1, 2), keepdim=True)
+
+        w = roi_map.shape[2]
+        pos = roi_map.view(num_keypoints, -1).argmax(1)
+
+        x_int = pos % w
+        y_int = (pos - x_int) // w
+
+        # assert (
+        #     roi_map_scores[keypoints_idx, y_int, x_int]
+        #     == roi_map_scores.view(num_keypoints, -1).max(1)[0]
+        # ).all()
+
+        #added item
+        kpt_2d = decode_keypoint(maps)
+
+        x_int = kpt_2d[i,:,0]
+        y_int = kpt_2d[i,:,1]
+
+        x = (x_int.float() + 0.5) * width_corrections[i]
+        y = (y_int.float() + 0.5) * height_corrections[i]
+        
+        xy_preds[i, :, 0] = x + offset_x[i]
+        xy_preds[i, :, 1] = y + offset_y[i]
+        xy_preds[i, :, 2] = 1
+        xy_preds[i, :, 3] = 1
+
+    return xy_preds
+
+if __name__ == "__main__":
+
+    keypoints = torch.Tensor([[[2,4,2], [3,2,2], [1,4,2]]])
+    rois = torch.Tensor([[0,0,5,5],[0,0,5,5],[0,0,5,5]])
+
+    a,b = _keypoints_to_vector_field(keypoints=keypoints, rois=rois, vector_field_size= 5)
+    print(type(a))
+
+    print(rois.shape)
+
+    asd = vector_field_to_keypoints(maps=a, rois=rois)
+    print(asd)
+    
