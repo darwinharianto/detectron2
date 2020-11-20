@@ -165,7 +165,7 @@ def keypoint_rcnn_pvnet_loss(pred_keypoint_logits, instances, normalizer):
         vector_fields.append(vector_field_per_image.view(-1,keypoint_side_len,keypoint_side_len))
         valid.append(valid_per_image.view(-1))
 
-#TODO Can i leave this as is? I guess so
+#TODO Can i leave this as is? I guess so. Update 2: sadly no :(
     if len(vector_fields):
         keypoint_targets = cat(vector_fields, dim=0)
         valid = cat(valid, dim=0).to(dtype=torch.uint8)
@@ -181,11 +181,14 @@ def keypoint_rcnn_pvnet_loss(pred_keypoint_logits, instances, normalizer):
         return pred_keypoint_logits.sum() * 0
 
     N, K, H, W = pred_keypoint_logits.shape
-    pred_keypoint_logits = pred_keypoint_logits.view(N * K, H * W)
+    pred_keypoint_logits = pred_keypoint_logits.view(N * K, H , W)
 
     keypoint_loss = F.smooth_l1_loss(
         pred_keypoint_logits[valid], keypoint_targets[valid], reduction="sum"
     )
+
+    visualize_votes(pred_keypoint_logits[valid], keypoint_targets[valid], [0])
+    
 
     # If a normalizer isn't specified, normalize by the number of visible keypoints in the minibatch
     if normalizer is None:
@@ -413,7 +416,7 @@ class KRCNNConvDeconvUpPVNetHead(BaseKeypointRCNNHead):
     def from_config(cls, cfg, input_shape):
         ret = {
             "loss_weight": cfg.MODEL.ROI_KEYPOINT_HEAD.LOSS_WEIGHT,
-            "num_keypoints": cfg.MODEL.ROI_KEYPOINT_HEAD.NUM_KEYPOINTS*2,
+            "num_keypoints": cfg.MODEL.ROI_KEYPOINT_HEAD.NUM_KEYPOINTS,
         }
         normalize_by_visible = (
             cfg.MODEL.ROI_KEYPOINT_HEAD.NORMALIZE_LOSS_BY_VISIBLE_KEYPOINTS
@@ -463,5 +466,81 @@ class KRCNNConvDeconvUpPVNetHead(BaseKeypointRCNNHead):
                 * self.loss_weight
             }
         else:
-            keypoint_rcnn_pvnet_pvnet_inference(x, instances)
+            keypoint_rcnn_pvnet_inference(x, instances)
             return instances
+
+
+
+# TODO CLEAN THIS UP
+
+class Iterator():
+    def __init__(self):
+        self.iter = 0
+    
+    def add(self):
+        self.iter += 1
+
+iterator = Iterator()
+
+def visualize_votes(map_pred, map_gt, mask_gt):
+    import os
+    import numpy as np
+    import cv2
+    iterator.add()
+    img_dir = os.path.join('./image')
+    if not os.path.exists(img_dir):
+        os.makedirs(img_dir)
+    
+    map_pred = map_pred.detach().cpu().numpy()
+    map_gt = map_gt.detach().cpu().numpy()
+    mask = np.ones((map_pred.shape[1],map_pred.shape[2]))
+    image = np.zeros((mask.shape[0], mask.shape[1]), dtype=np.uint8)
+    ys, xs = np.nonzero(mask)
+    # visualize pred
+    images_pred = [image.copy() for _ in range(map_pred.shape[0] // 2)]
+    for i_pt in range(len(ys)):
+        for i_keypt in range(map_pred.shape[0] // 2):
+            y = ys[i_pt]
+            x = xs[i_pt]
+            map_x = map_pred[i_keypt * 2, y, x]
+            map_y = map_pred[i_keypt * 2 + 1, y, x]
+            if map_x == 0:
+                continue
+            angle = np.arctan(np.abs(map_y) / np.abs(map_x)) / (np.pi / 2) * 90
+            if map_x < 0 and map_y > 0:
+                angle = 180 - angle
+            if map_x < 0 and map_y < 0:
+                angle = 180 + angle
+            if map_x >= 0 and map_y < 0:
+                angle = 360 - angle
+            images_pred[i_keypt][y, x] = int(round(angle / 360 * 255))
+    images_pred = [cv2.applyColorMap(im_gray, cv2.COLORMAP_HSV) for im_gray in images_pred]
+    # visualize gt
+    images_gt = [image.copy() for _ in range(map_gt.shape[0] // 2)]
+    for i_pt in range(len(ys)):
+        for i_keypt in range(map_gt.shape[0] // 2):
+            y = ys[i_pt]
+            x = xs[i_pt]
+            map_x = map_gt[i_keypt * 2, y, x]
+            map_y = map_gt[i_keypt * 2 + 1, y, x]
+            if map_x == 0:
+                continue
+            angle = np.arctan(np.abs(map_y) / np.abs(map_x)) / (np.pi / 2) * 90
+            if map_x < 0 and map_y > 0:
+                angle = 180 - angle
+            if map_x < 0 and map_y < 0:
+                angle = 180 + angle
+            if map_x >= 0 and map_y < 0:
+                angle = 360 - angle
+            images_gt[i_keypt][y, x] = int(round(angle / 360 * 255))
+    images_gt = [cv2.applyColorMap(im_gray, cv2.COLORMAP_HSV) for im_gray in images_gt]
+
+
+    # for i, (im_pred,im_gt) in enumerate(zip(images_pred, images_gt)):
+    
+    img_res_name = os.path.join(img_dir, '{}_vote_kp_gt_pred.jpg'.format(iterator.iter))
+    
+    
+    im = cv2.hconcat([images_pred[0], images_gt[0]])
+    cv2.imwrite(img_res_name, im)
+    

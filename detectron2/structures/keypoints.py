@@ -2,13 +2,8 @@
 import numpy as np
 from typing import Any, List, Tuple, Union
 import torch
-<<<<<<< HEAD
-from detectron2.lib.csrc.ransac_voting.ransac_voting_gpu import ransac_voting_layer_v3
-
-from detectron2.layers import interpolate
-=======
 from torch.nn import functional as F
->>>>>>> 84a09834f6d838534951907fd9ef90fec73614d2
+from detectron2.lib.csrc.ransac_voting.ransac_voting_gpu import ransac_voting_layer_v3
 
 
 class Keypoints:
@@ -242,13 +237,14 @@ def heatmaps_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.Tenso
 
 
 def compute_vertex(vector_field_size, keypoints):
+
     vector_field = np.ones((vector_field_size,vector_field_size))
     h,w = vector_field.shape
     m = keypoints.shape[0]
     xy = np.argwhere(vector_field == 1)[:, [1,0]]
 
     vertex = keypoints[None] - xy[:,None]
-    norm = np.linalg.norm(vertex, axis=2, keepdims=True)
+    norm =  np.linalg.norm(vertex, axis=2, keepdims=True)
     norm[norm<1e-3] += 1e-3
     vertex = vertex/norm
 
@@ -256,7 +252,6 @@ def compute_vertex(vector_field_size, keypoints):
     vertex_out[xy[:, 1], xy[:,0]] = vertex
     vertex_out = np.reshape(vertex_out, [h, w, m*2])
 
-    print(vertex_out.shape)
     return vertex_out
 
 # TODO make this nicer, this is a direct translation from C2 (but removing the inner loop)
@@ -313,9 +308,9 @@ def _keypoints_to_vector_field(
     valid = (valid_loc & vis).long()
     valid = valid.repeat_interleave(2)
     
-    lin_ind = torch.empty(keypoints.shape[2],keypoints.shape[2]*2,vector_field_size,vector_field_size)
-    # print(lin_ind.shape)
-
+    
+    lin_ind = torch.empty(keypoints.shape[0],keypoints.shape[1]*2,vector_field_size,vector_field_size)
+    
 
     for j, kpt_2d_list in enumerate((zip(x,y))):
 
@@ -324,13 +319,13 @@ def _keypoints_to_vector_field(
         if len(x_list) == len(y_list):
             for i in range(len(x_list)):
                 
-                kpt = np.array([[x_list[i], y_list[i]]])
+                kpt = torch.tensor([[x_list[i], y_list[i]]])
                 vec_field = compute_vertex(vector_field_size,kpt)
+
                 lin_ind[j,2*i,:,:] = torch.tensor(vec_field)[:,:,0]
                 lin_ind[j,2*i+1,:,:] = torch.tensor(vec_field)[:,:,1]
 
-    ### pvnet always valid
-    vector_fields = lin_ind
+    vector_fields = lin_ind.cuda()
     valid = torch.reshape(valid, (vector_fields.shape[0],-1))
     # print("vector field", vector_fields)
     
@@ -361,12 +356,10 @@ def decode_keypoint(vec_field):
     b,h,w,vn_2 = vertex.shape
     vertex = vertex.view(b,h,w,vn_2//2, 2)
     mask = torch.ones((b,h,w))
-    print(vertex.shape)
-    print(mask.shape)
 
     kpt_2d = ransac_voting_layer_v3(mask.cuda(), vertex.cuda(), 128, inlier_thresh=0.99, max_num=100)
     
-    return kpt_2d.cpu()
+    return kpt_2d
 
 @torch.no_grad()
 def vector_field_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.Tensor:
@@ -389,9 +382,6 @@ def vector_field_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.T
     
     offset_x = rois[:, 0]
     offset_y = rois[:, 1]
-    print(f"offset_x {offset_x}")
-    print("roi", rois.shape)
-    print("maps", maps.shape)
 
     widths = (rois[:, 2] - rois[:, 0]).clamp(min=1)
     heights = (rois[:, 3] - rois[:, 1]).clamp(min=1)
@@ -409,7 +399,7 @@ def vector_field_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.T
 
     for i in range(num_rois):
         outsize = (int(heights_ceil[i]), int(widths_ceil[i]))
-        roi_map = interpolate(maps[[i]], size=outsize, mode="bicubic", align_corners=False).squeeze(
+        roi_map = F.interpolate(maps[[i]], size=outsize, mode="bilinear", align_corners=False).squeeze(
             0
         )  # #keypoints x H x W
 
@@ -451,14 +441,11 @@ def vector_field_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.T
 
 if __name__ == "__main__":
 
-    keypoints = torch.Tensor([[[2,4,2], [3,2,2], [1,4,2]]])
-    rois = torch.Tensor([[0,0,5,5],[0,0,5,5],[0,0,5,5]])
+    keypoints = torch.Tensor([[[2,4,2], [3,2,2], [1,4,2]]]).cuda()
+    rois = torch.Tensor([[0,0,5,5],[0,0,5,5],[0,0,5,5]]).cuda()
 
+    # i dont know how to make keypoints and rois, this test is wrong
     a,b = _keypoints_to_vector_field(keypoints=keypoints, rois=rois, vector_field_size= 5)
-    print(type(a))
-
-    print(rois.shape)
-
+   
     asd = vector_field_to_keypoints(maps=a, rois=rois)
-    print(asd)
-    
+     
