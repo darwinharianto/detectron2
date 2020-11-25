@@ -29,9 +29,11 @@ cfg.MODEL.WEIGHTS = "detectron2://COCO-Keypoints/keypoint_rcnn_R_50_FPN_3x/13784
 cfg.SOLVER.IMS_PER_BATCH = 2
 cfg.SOLVER.BASE_LR = 0.02
 cfg.MODEL.ROI_KEYPOINT_HEAD.LOSS_WEIGHT = 0.01
+cfg.SOLVER.CHECKPOINT_PERIOD = 100
+cfg.INPUT.RANDOM_FLIP = "none"
 cfg.MODEL.ROI_KEYPOINT_HEAD.NAME = "KRCNNConvDeconvUpPVNetHead"
 cfg.SOLVER.MAX_ITER = (
-    30000
+    3000
 )  # 300 iterations seems good enough, but you can certainly train longer
 cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = (
     128
@@ -45,5 +47,5 @@ MetadataCatalog.get(train_model_name).keypoint_flip_map = []
 
 os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 trainer = DefaultTrainer(cfg)
-trainer.resume_or_load(resume=False)
+trainer.resume_or_load(resume=True)
 trainer.train()

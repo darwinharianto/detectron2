@@ -478,11 +478,19 @@ class Iterator():
         self.iter = 0
     
     def add(self):
+        if self.iter == 1000:
+            self.iter = 0
         self.iter += 1
 
 iterator = Iterator()
 
 def visualize_votes(map_pred, map_gt, mask_gt):
+
+    #########################
+    #  this method is taken from hybrid pose repository
+    #  https://github.com/chensong1995/HybridPose
+    #  this is only used for visualizing vector field, no need to include this
+    #########################
     import os
     import numpy as np
     import cv2
@@ -540,7 +548,13 @@ def visualize_votes(map_pred, map_gt, mask_gt):
     
     img_res_name = os.path.join(img_dir, '{}_vote_kp_gt_pred.jpg'.format(iterator.iter))
     
+    imv = np.array([])
+    for i in range(len(images_pred)):
+        imh = cv2.hconcat([images_pred[i], images_gt[i]])
+        if len(imv) == 0:
+            imv = imh
+        else:
+            imv = cv2.vconcat([imv, imh])
     
-    im = cv2.hconcat([images_pred[0], images_gt[0]])
-    cv2.imwrite(img_res_name, im)
+    cv2.imwrite(img_res_name, imv)
     

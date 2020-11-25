@@ -305,7 +305,7 @@ def _keypoints_to_vector_field(
     y[y_boundary_inds] = vector_field_size - 1
     valid_loc = (x >= 0) & (y >= 0) & (x < vector_field_size) & (y < vector_field_size)
     vis = keypoints[..., 2] > 0
-    valid = (valid_loc & vis).long()
+    valid = (vis).long()
     valid = valid.repeat_interleave(2)
     
     
@@ -424,10 +424,10 @@ def vector_field_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.T
         # ).all()
 
         #added item
-        kpt_2d = decode_keypoint(maps)
-
-        x_int = kpt_2d[i,:,0]
-        y_int = kpt_2d[i,:,1]
+        kpt_2d = decode_keypoint(roi_map.unsqueeze(0))
+        # why do i need index 0??
+        x_int = kpt_2d[0,:,0]
+        y_int = kpt_2d[0,:,1]
 
         x = (x_int.float() + 0.5) * width_corrections[i]
         y = (y_int.float() + 0.5) * height_corrections[i]

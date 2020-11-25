@@ -38,7 +38,7 @@ cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = (
 )  # faster, and good enough for this toy dataset
 cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # 3 classes (data, fig, hazelnut)
 cfg.MODEL.ROI_KEYPOINT_HEAD.NUM_KEYPOINTS = 8
-cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
+cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_0000299.pth")
 cfg.MODEL.ROI_KEYPOINT_HEAD.NAME = "KRCNNConvDeconvUpPVNetHead"
 cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5   # set the testing threshold for this model
 cfg.DATASETS.TEST = ("nihonbashi", )
