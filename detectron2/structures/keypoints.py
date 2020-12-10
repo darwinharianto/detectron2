@@ -399,9 +399,16 @@ def vector_field_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.T
 
     for i in range(num_rois):
         outsize = (int(heights_ceil[i]), int(widths_ceil[i]))
-        roi_map = F.interpolate(maps[[i]], size=outsize, mode="bilinear", align_corners=False).squeeze(
-            0
-        )  # #keypoints x H x W
+        
+        print(outsize)
+        # roi_map = F.interpolate(maps[[i]], size=maps[[i]].shape[:-2], mode="bilinear", align_corners=False).squeeze(
+        #     0
+        # )  # #keypoints x H x W
+
+        kpt_2d = decode_keypoint(maps)
+
+        kpt_2d[0,:,0] = kpt_2d[0,:,0]/maps[[i]].shape[3] * outsize[1]
+        kpt_2d[0,:,1] = kpt_2d[0,:,1]/maps[[i]].shape[2] * outsize[0]
 
         # # softmax over the spatial region
         # max_score, _ = roi_map.view(num_keypoints, -1).max(1)
@@ -412,11 +419,11 @@ def vector_field_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.T
         # # so that the scores of objects of different absolute sizes will be more comparable
         # roi_map_scores = tmp_full_resolution / tmp_pool_resolution.sum((1, 2), keepdim=True)
 
-        w = roi_map.shape[2]
-        pos = roi_map.view(num_keypoints, -1).argmax(1)
+        # w = roi_map.shape[2]
+        # pos = roi_map.view(num_keypoints, -1).argmax(1)
 
-        x_int = pos % w
-        y_int = (pos - x_int) // w
+        # x_int = pos % w
+        # y_int = (pos - x_int) // w
 
         # assert (
         #     roi_map_scores[keypoints_idx, y_int, x_int]
@@ -424,19 +431,20 @@ def vector_field_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.T
         # ).all()
 
         #added item
-        kpt_2d = decode_keypoint(roi_map.unsqueeze(0))
+        # kpt_2d = decode_keypoint(maps)
+        # print(kpt_2d)
         # why do i need index 0??
         x_int = kpt_2d[0,:,0]
         y_int = kpt_2d[0,:,1]
 
         x = (x_int.float() + 0.5) * width_corrections[i]
         y = (y_int.float() + 0.5) * height_corrections[i]
-        
+
         xy_preds[i, :, 0] = x + offset_x[i]
         xy_preds[i, :, 1] = y + offset_y[i]
         xy_preds[i, :, 2] = 1
         xy_preds[i, :, 3] = 1
-
+    
     return xy_preds
 
 if __name__ == "__main__":

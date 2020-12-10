@@ -6,7 +6,7 @@ from torch.nn import functional as F
 
 from detectron2.config import configurable
 from detectron2.layers import Conv2d, ConvTranspose2d, cat, interpolate
-from detectron2.structures import Instances, heatmaps_to_keypoints, vector_field_to_keypoints
+from detectron2.structures import Instances, heatmaps_to_keypoints, vector_field_to_keypoints, Keypoints
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.registry import Registry
 
@@ -187,7 +187,7 @@ def keypoint_rcnn_pvnet_loss(pred_keypoint_logits, instances, normalizer):
         pred_keypoint_logits[valid], keypoint_targets[valid], reduction="sum"
     )
 
-    visualize_votes(pred_keypoint_logits[valid], keypoint_targets[valid], [0])
+    #visualize_votes(pred_keypoint_logits[valid], keypoint_targets[valid], [0])
     
 
     # If a normalizer isn't specified, normalize by the number of visible keypoints in the minibatch
@@ -215,10 +215,92 @@ def keypoint_rcnn_pvnet_inference(pred_keypoint_logits, pred_instances):
             dimension corresponds to (x, y, score).
             The scores are larger than 0.
     """
+
+    # ################################ DELETE THIS LATER ############################################
+
+    # debug = True
+    # import detectron2.data.transforms as T
+    # from detectron2.data import DatasetMapper 
+    # from detectron2.config import get_cfg
+    # import cv2
+    
+    # if debug:
+
+    #     import json
+    #     import numpy as np
+    #     with open('/home/nizar/Desktop/coco_annotations_2/output/coco_data/new_coco_annotations.json', 'r') as f:
+    #         asd = json.loads(f.read())
+        
+    #     for i in asd["images"]:
+    #         if i["file_name"] ==  f'rgb_{str(iterator.iter).zfill(4)}.png':
+    #             image_name = f'rgb_{str(iterator.iter).zfill(4)}.png'
+    #             image_id = i["id"]
+    #     for i in asd["annotations"]:
+    #         if i["image_id"] == image_id:
+    #             kpt = i["keypoints"]
+    #             kpt = np.array(kpt)
+                
+
+    #     inputs = T.AugInput(cv2.imread(f'/home/nizar/Desktop/coco_annotations_2/output/coco_data/rgb_{str(iterator.iter).zfill(4)}.png'))
+        
+    #     augs = T.AugmentationList([T.ResizeShortestEdge(800, 1333)])
+    #     transform = augs(inputs)  # type: T.Transform
+        
+    #     keypoints = transform_keypoint_annotations(
+    #         kpt, transform, (800,1333), None
+    #     )
+    #     kpt_reshape = keypoints.reshape(-1,8,3)
+
+
+    #     vector_fields = []
+    #     valid = []
+
+
+    #     keypoint_side_len = pred_keypoint_logits.shape[2]
+    #     for instances_per_image in pred_instances:
+    #         if len(instances_per_image) == 0:
+    #             continue
+            
+
+    #         instances_per_image.gt_keypoints = Keypoints(kpt_reshape)
+    #         # apply mapper to gt_keypoints
+
+    #         keypoints = instances_per_image.gt_keypoints
+    #         vector_field_per_image, valid_per_image = keypoints.to_vector_field(
+    #             instances_per_image.pred_boxes.tensor.cpu(), keypoint_side_len
+    #         )
+    #         # Is this ok????
+    #         vector_fields.append(vector_field_per_image.view(-1,keypoint_side_len,keypoint_side_len))
+    #         valid.append(valid_per_image.view(-1))
+
+    #     #TODO Can i leave this as is? I guess so. Update 2: sadly no :(
+    #     if len(vector_fields):
+    #         keypoint_targets = cat(vector_fields, dim=0)
+    #         valid = cat(valid, dim=0).to(dtype=torch.uint8)
+    #         valid = torch.nonzero(valid).squeeze(1)
+
+
+    #     N, K, H, W = pred_keypoint_logits.shape
+    #     pred_keypoint_logits = pred_keypoint_logits.view(N * K, H , W)
+
+    #     decoded_kpt = decode_keypoint(keypoint_targets.reshape(N, K, H, W))
+    #     print(decoded_kpt)
+    #     decoded_kpt = decode_keypoint(pred_keypoint_logits.reshape(N, K, H, W))
+    #     print(decoded_kpt)
+
+    #     visualize_votes(pred_keypoint_logits[valid], keypoint_targets[valid], [0])
+
+    # ################################################################################################
+
     # flatten all bboxes from all images together (list[Boxes] -> Rx4 tensor)
     bboxes_flat = cat([b.pred_boxes.tensor for b in pred_instances], dim=0)
 
     keypoint_results = vector_field_to_keypoints(pred_keypoint_logits.detach(), bboxes_flat.detach())
+
+    # print(kpt_reshape)
+    # print(keypoint_results)
+    # exit()
+
     num_instances_per_image = [len(i) for i in pred_instances]
     keypoint_results = keypoint_results[:, :, [0, 1, 3]].split(num_instances_per_image, dim=0)
 
@@ -557,4 +639,74 @@ def visualize_votes(map_pred, map_gt, mask_gt):
             imv = cv2.vconcat([imv, imh])
     
     cv2.imwrite(img_res_name, imv)
+
+import numpy as np 
+import detectron2.data.transforms as T
+def transform_keypoint_annotations(keypoints, transforms, image_size, keypoint_hflip_indices=None):
+    """
+    Transform keypoint annotations of an image.
+    If a keypoint is transformed out of image boundary, it will be marked "unlabeled" (visibility=0)
+    Args:
+        keypoints (list[float]): Nx3 float in Detectron2's Dataset format.
+            Each point is represented by (x, y, visibility).
+        transforms (TransformList):
+        image_size (tuple): the height, width of the transformed image
+        keypoint_hflip_indices (ndarray[int]): see `create_keypoint_hflip_indices`.
+            When `transforms` includes horizontal flip, will use the index
+            mapping to flip keypoints.
+    """
+    # (N*3,) -> (N, 3)
+    keypoints = np.asarray(keypoints, dtype="float64").reshape(-1, 3)
+    keypoints_xy = transforms.apply_coords(keypoints[:, :2])
+
+    # Set all out-of-boundary points to "unlabeled"
+    inside = (keypoints_xy >= np.array([0, 0])) & (keypoints_xy <= np.array(image_size[::-1]))
+    inside = inside.all(axis=1)
+    keypoints[:, :2] = keypoints_xy
+    keypoints[:, 2][~inside] = 0
+
+    # This assumes that HorizFlipTransform is the only one that does flip
+    do_hflip = sum(isinstance(t, T.HFlipTransform) for t in transforms.transforms) % 2 == 1
+
+    # Alternative way: check if probe points was horizontally flipped.
+    # probe = np.asarray([[0.0, 0.0], [image_width, 0.0]])
+    # probe_aug = transforms.apply_coords(probe.copy())
+    # do_hflip = np.sign(probe[1][0] - probe[0][0]) != np.sign(probe_aug[1][0] - probe_aug[0][0])  # noqa
+
+    # If flipped, swap each keypoint with its opposite-handed equivalent
+    if do_hflip:
+        assert keypoint_hflip_indices is not None
+        keypoints = keypoints[keypoint_hflip_indices, :]
+
+    # Maintain COCO convention that if visibility == 0 (unlabeled), then x, y = 0
+    keypoints[keypoints[:, 2] == 0] = 0
+    return keypoints
+
+
+from detectron2.lib.csrc.ransac_voting.ransac_voting_gpu import ransac_voting_layer_v3
+def decode_keypoint(vec_field):
+    """
+    Input vector fields map, output corresponding 2D keypoint outputs.
+    This method is extracted from PVNet, resnet18.py
+
+    Args:
+        vec_field: Predicted vector fields with number of keypoints*2 for each
+                    x and y direction
+
+    Returns:
+        Corresponding 2D keypoints that is generated from each vector field.
+        Return item will have dimension N, K, 2.
+        N represents number layer, K represents number of keypoints, 2 means x and y position.
+        
+
+    This method is using ransac layer and compiled in C.
+    """
+
+    vertex = vec_field.permute(0,2,3,1)
+    b,h,w,vn_2 = vertex.shape
+    vertex = vertex.view(b,h,w,vn_2//2, 2)
+    mask = torch.ones((b,h,w))
+
+    kpt_2d = ransac_voting_layer_v3(mask.cuda(), vertex.cuda(), 512, inlier_thresh=0.99, max_num=100)
     
+    return kpt_2d
